@@ -30,8 +30,8 @@ The system is built on a microservices architecture with Next.js-based API route
 OPENAI_API_KEY=""
 SUPABASE_URL=""
 SUPABASE_SERVICE_ROLE_KEY=""
-LANGGRAPH_INGESTION_ASSISTANT_ID=""
-LANGGRAPH_RETRIEVAL_ASSISTANT_ID=""
+LANGSMITH_API_KEY=""
+LANGSMITH_PROJECT=""
 DATABASE_URL=""
 DIRECT_URL=""
 ```
@@ -2012,9 +2012,11 @@ OPENAI_API_KEY="sk-xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 SUPABASE_URL="https://xxxxxxxxxxxxxxxx.supabase.co"
 SUPABASE_SERVICE_ROLE_KEY="eyJxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx"
 
-# LangGraph Configuration
-LANGGRAPH_INGESTION_ASSISTANT_ID="asst_xxxxxxxxxxxxxxxxxxxxxxxx"
-LANGGRAPH_RETRIEVAL_ASSISTANT_ID="asst_xxxxxxxxxxxxxxxxxxxxxxxx"
+# LangGraph (not required for developent purpose)
+LANGSMITH_TRACING=true
+LANGSMITH_ENDPOINT="https://api.smith.langchain.com"
+LANGSMITH_API_KEY=""
+LANGSMITH_PROJECT=""
 
 # Database Connection
 DATABASE_URL="postgresql://postgres:yourpassword@db.xxxxxxxxxxxxx.supabase.co:5432/postgres?pgbouncer=true"

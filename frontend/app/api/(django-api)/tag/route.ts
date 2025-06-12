@@ -9,93 +9,111 @@ const logger = Logger.getInstance({
 
 const SERVICE_NAME = 'tagging-api';
 const BASE_API_URL = process.env.BASE_API_URL || 'http://localhost:8000';
-const TAGGING_API_URL = `${BASE_API_URL}/api/v1/tagging/tag/`;
 
-/**
- * Validates UUID format
- * @param uuid The UUID to validate
- * @returns Boolean indicating if the UUID is valid
- */
-function isValidUUID(uuid: string): boolean {
-  const uuidRegex = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
-  return uuidRegex.test(uuid);
+function validateUuid(uuid: string | null): uuid is string {
+  return Boolean(uuid && uuid.trim().length > 0);
 }
 
-/**
- * Creates and returns a standardized error response with proper logging
- * @param message Error message
- * @param error Error details
- * @param status HTTP status code
- * @returns NextResponse with formatted error
- */
 function createErrorResponse(
   message: string,
   error: string | object,
-  status: number,
-  retryable: boolean = true
+  status: number
 ): NextResponse {
   logger.error(`${message}: ${JSON.stringify(error)}`, SERVICE_NAME);
-  return NextResponse.json({
-    success: false,
-    message,
-    error,
-    showToast: true,
-    toastType: 'error',
-    toastTitle: 'Tagging Error',
-    toastMessage: typeof error === 'string' ? error : message,
-    retryable
-  }, { status });
+  return NextResponse.json({ message, error }, { status });
 }
 
 /**
- * Handler for POST requests to initiate the tagging process
- * Acts as a proxy to the backend tagging service
+ * Handles POST requests to initiate tagging for a document
  */
 export async function POST(request: NextRequest) {
   const requestId = crypto.randomUUID();
   logger.info(`Processing POST request [${requestId}] to initiate tagging`, SERVICE_NAME);
 
   try {
-    // Parse request body
-    let requestData;
+    // Parse the request body
+    const requestBody = await request.json();
+    logger.debug(`Request body: ${JSON.stringify(requestBody)}`, SERVICE_NAME);
+
+    // Extract the UUID from the request
+    const { uuid } = requestBody;
+
+    if (!validateUuid(uuid)) {
+      logger.warn(`Invalid uuid: ${uuid}`, SERVICE_NAME);
+      return createErrorResponse(
+        'Bad request',
+        'uuid is required and cannot be empty',
+        400
+      );
+    }
+
+    logger.debug(`Processing tagging request for uuid: ${uuid}`, SERVICE_NAME);
+
+    // First, fetch the data from the mapping endpoint
+    const MAPPING_API_URL = `${BASE_API_URL}/api/v1/mapping/partial-xbrl/${uuid}/`;
+
+    logger.debug(`Fetching mapping data from: ${MAPPING_API_URL}`, SERVICE_NAME);
+
+    let mappingResponse;
     try {
-      requestData = await request.json();
-    } catch (parseError) {
-      logger.error(`Failed to parse request body: ${parseError}`, SERVICE_NAME);
+      mappingResponse = await fetch(MAPPING_API_URL, {
+        method: 'GET',
+        headers: {
+          'X-Request-ID': requestId,
+        }
+      });
+      logger.debug(`Received response from mapping service with status: ${mappingResponse.status}`, SERVICE_NAME);
+    } catch (fetchError) {
+      logger.error(`Failed to connect to mapping service: ${String(fetchError)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Invalid request',
-        'Failed to parse request body as JSON',
-        400,
-        true
+        'Failed to connect to mapping service',
+        String(fetchError),
+        503
       );
     }
 
-    const { uuid } = requestData;
-
-    if (!uuid) {
-      logger.error('Missing uuid in request body', SERVICE_NAME);
+    if (!mappingResponse.ok) {
+      const errorData = await mappingResponse.json().catch(() => null);
+      logger.error(`Error from mapping service: ${JSON.stringify(errorData)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Bad request',
-        'uuid is required in the request body',
-        400,
-        true
+        'Error from mapping service',
+        errorData || `Failed with status: ${mappingResponse.status}`,
+        mappingResponse.status
       );
     }
 
-    if (!isValidUUID(uuid)) {
-      logger.error(`Invalid UUID format: ${uuid}`, SERVICE_NAME);
+    // Parse the mapping response
+    let mappingData;
+    try {
+      mappingData = await mappingResponse.json();
+      logger.debug(`Successfully retrieved mapping data`, SERVICE_NAME);
+    } catch (jsonError) {
+      logger.error(`Failed to parse mapping response as JSON: ${String(jsonError)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Bad request',
-        'Invalid UUID format',
-        400,
-        true
+        'Failed to parse mapping response',
+        String(jsonError),
+        500
       );
     }
 
-    logger.debug(`Initiating tagging for document UUID: ${uuid}`, SERVICE_NAME);
+    // Extract the document UUID from the mapping data
+    const mappingUuid = mappingData.data?.id || uuid;
 
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), 30000);
+    if (!mappingUuid) {
+      logger.error(`No document UUID found in mapping response: ${JSON.stringify(mappingData)}`, SERVICE_NAME);
+      return createErrorResponse(
+        'Invalid mapping response',
+        'No document UUID found in mapping data',
+        500
+      );
+    }
+
+    logger.info(`Using document UUID from mapping data: ${mappingUuid}`, SERVICE_NAME);
+
+    // Now call the tagging endpoint with the extracted document UUID
+    const TAGGING_API_URL = `${BASE_API_URL}/api/v1/tagging/tag/${mappingUuid}/`;
+
+    logger.debug(`Sending request to tagging service: ${TAGGING_API_URL}`, SERVICE_NAME);
 
     let taggingResponse;
     try {
@@ -105,153 +123,76 @@ export async function POST(request: NextRequest) {
           'Content-Type': 'application/json',
           'X-Request-ID': requestId,
         },
-        body: JSON.stringify({ document_id: uuid }),
-        signal: controller.signal
+        body: JSON.stringify({ requestId })
       });
       logger.debug(`Received response from tagging service with status: ${taggingResponse.status}`, SERVICE_NAME);
     } catch (fetchError) {
-      clearTimeout(timeoutId);
-
-      if (fetchError instanceof DOMException && fetchError.name === 'AbortError') {
-        logger.error(`Request timeout initiating tagging for UUID ${uuid}`, SERVICE_NAME);
-        return createErrorResponse(
-          'Request timeout',
-          'Connection to tagging service timed out',
-          504,
-          true
-        );
-      }
-
-      logger.error(`Failed to connect to tagging service: ${fetchError}`, SERVICE_NAME);
+      logger.error(`Failed to connect to tagging service: ${String(fetchError)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Connection error',
-        `Failed to connect to tagging service: ${String(fetchError)}`,
-        503,
-        true
+        'Failed to connect to tagging service',
+        String(fetchError),
+        503
       );
-    } finally {
-      clearTimeout(timeoutId);
     }
 
     if (!taggingResponse.ok) {
-      let errorDetails;
+      let errorData;
       try {
-        errorDetails = await taggingResponse.json();
-      } catch (jsonError) {
-        try {
-          errorDetails = await taggingResponse.text();
-        } catch (textError) {
-          errorDetails = `Status: ${taggingResponse.status} ${taggingResponse.statusText}`;
-        }
+        errorData = await taggingResponse.json();
+      } catch (e) {
+        errorData = await taggingResponse.text();
       }
-
-      logger.error(`Error from tagging service: ${JSON.stringify(errorDetails)}`, SERVICE_NAME);
-
-      let errorMessage;
-      let isRetryable = true;
-      let statusCode = taggingResponse.status;
-
-      switch (taggingResponse.status) {
-        case 400:
-          errorMessage = 'Invalid document ID or format';
-          break;
-        case 404:
-          errorMessage = 'Document not found for tagging';
-          isRetryable = false;
-          break;
-        case 401:
-        case 403:
-          errorMessage = 'Authentication or authorization error';
-          isRetryable = false;
-          break;
-        case 409:
-          errorMessage = 'Document is already being processed';
-          isRetryable = true;
-          break;
-        case 429:
-          errorMessage = 'Too many requests. Please try again later';
-          isRetryable = true;
-          break;
-        case 500:
-        case 502:
-        case 503:
-        case 504:
-          errorMessage = 'The tagging service is currently unavailable';
-          statusCode = 502;
-          isRetryable = true;
-          break;
-        default:
-          errorMessage = `Request failed with status: ${taggingResponse.status}`;
-          isRetryable = true;
-      }
-
+      logger.error(`Error from tagging service: ${JSON.stringify(errorData)}`, SERVICE_NAME);
       return createErrorResponse(
-        errorMessage,
-        errorDetails || `Failed with status: ${taggingResponse.status}`,
-        statusCode,
-        isRetryable
+        'Error from tagging service',
+        errorData || `Failed with status: ${taggingResponse.status}`,
+        taggingResponse.status
       );
     }
 
-    // Process successful response
-    let responseData;
+    // Parse the tagging response
+    let taggingData;
     try {
-      responseData = await taggingResponse.json();
-      logger.debug(`Received tagging response: ${JSON.stringify(responseData)}`, SERVICE_NAME);
+      taggingData = await taggingResponse.json();
+      logger.debug(`Full tagging response: ${JSON.stringify(taggingData)}`, SERVICE_NAME);
     } catch (jsonError) {
-      logger.error(`Failed to parse tagging response as JSON: ${jsonError}`, SERVICE_NAME);
+      logger.error(`Failed to parse tagging response as JSON: ${String(jsonError)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Data parsing error',
-        `Failed to parse tagging service response: ${String(jsonError)}`,
-        500,
-        true
+        'Failed to parse tagging response',
+        String(jsonError),
+        500
       );
     }
 
-    // Verify response structure
-    if (!responseData || !responseData.data || !responseData.data.task_id) {
-      logger.error(`Invalid tagging response structure: ${JSON.stringify(responseData)}`, SERVICE_NAME);
+    // Extract the task_id from the response
+    const task_id = taggingData?.data?.task_id;
+
+    if (!task_id) {
+      logger.error(`No task_id found in tagging response: ${JSON.stringify(taggingData)}`, SERVICE_NAME);
       return createErrorResponse(
-        'Invalid response',
-        'Missing task ID in tagging service response',
-        500,
-        true
+        'Invalid response from tagging service',
+        'No task_id found in response',
+        500
       );
     }
 
-    logger.info(`Successfully initiated tagging for UUID ${uuid}, task ID: ${responseData.data.task_id}`, SERVICE_NAME);
+    logger.info(`Tagging request accepted with task_id: ${task_id}`, SERVICE_NAME);
 
-    // Return successful response to client
     return NextResponse.json({
       success: true,
-      message: 'Tagging process initiated successfully',
+      message: 'XBRL tagging request accepted for processing',
       data: {
-        task_id: responseData.data.task_id,
-        document_id: uuid
-      },
-      showToast: true,
-      toastType: 'success',
-      toastTitle: 'Tagging Started',
-      toastMessage: 'XBRL tagging process has been initiated'
-    }, {
-      status: 200,
-      headers: {
-        'X-Request-ID': requestId
+        status: 'PROCESSING',
+        task_id: task_id
       }
     });
 
   } catch (error) {
-    logger.error(`Unhandled exception in tagging API: ${error}`, SERVICE_NAME);
-
-    if (error instanceof Error && error.stack) {
-      logger.error(`Stack trace: ${error.stack}`, SERVICE_NAME);
-    }
-
+    logger.error(`Internal server error: ${String(error)}`, SERVICE_NAME);
     return createErrorResponse(
       'Internal server error',
       String(error),
-      500,
-      true
+      500
     );
   }
 }
